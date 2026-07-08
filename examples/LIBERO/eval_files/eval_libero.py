@@ -234,8 +234,8 @@ def eval_libero(args: Args) -> None:
         logging.info(f"Current task success rate: {float(task_successes) / float(task_episodes)}")
         logging.info(f"Current total success rate: {float(total_successes) / float(total_episodes)}")
 
-    logging.info(f"Total success rate: {float(total_successes) / float(total_episodes)}")
-    logging.info(f"Total episodes: {total_episodes}")
+    logging.info(f">> Total success rate: {float(total_successes) / float(total_episodes):.4f}")
+    logging.info(f">> Total episodes: {total_episodes}")
 
 
 def _get_libero_env(task, resolution, seed):

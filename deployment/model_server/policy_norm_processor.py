@@ -218,7 +218,12 @@ def _build_dataset_metadata(
     state_combined = stats_for_key.get("state", {})
 
     action_stats, action_meta = _split_combined(action_combined, action_keys, action_key_dims)
-    state_stats, state_meta = _split_combined(state_combined, state_keys, state_key_dims)
+    if state_combined and state_keys:
+        state_stats, state_meta = _split_combined(
+            state_combined, state_keys, state_key_dims
+        )
+    else:
+        state_stats, state_meta = {}, {}
 
     # Pydantic accepts dict input with field validators
     return DatasetMetadata.model_validate(

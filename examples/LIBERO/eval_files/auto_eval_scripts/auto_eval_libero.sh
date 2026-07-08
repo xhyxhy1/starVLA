@@ -14,7 +14,7 @@ CKPT_DIR="results/Checkpoints/0415_libero4in1_WanOFT/checkpoints"
 
 # --- Or specify an explicit list (overrides CKPT_DIR when non-empty) ---
 CKPT_LIST=(
-    # "playground/Checkpoints/.../steps_30000_pytorch_model.pt"
+    "playground/Checkpoints/libero4in1_qwenpi_v3_from_lap/checkpoints/steps_160000_pytorch_model.pt"
     # "playground/Checkpoints/.../steps_50000_pytorch_model.pt"
 )
 
@@ -22,10 +22,10 @@ CKPT_LIST=(
 TASK_SUITES=(libero_10 libero_goal libero_object libero_spatial)
 
 # --- Available GPUs (will be used in round-robin) ---
-GPU_LIST=(0 1)
+GPU_LIST=(0 1 2 3)
 
 # --- Base port (each job gets base_port + job_index) ---
-BASE_PORT=6450
+BASE_PORT=6666
 
 # --- Seconds to wait between launching jobs on the SAME GPU ---
 SLEEP_BETWEEN=20
@@ -71,7 +71,7 @@ for ckpt in "${CKPT_LIST[@]}"; do
         ckpt_name=$(basename "$ckpt" .pt)
         echo "[Job ${job_index}] GPU=${gpu_id}  port=${port}  ckpt=${ckpt_name}  task=${task}"
 
-        bash "$SCRIPT_PATH" "$ckpt" "$task" "$gpu_id" "$port"
+        bash "$SCRIPT_PATH" "$ckpt" "$task" "$gpu_id" "$port" &
         pids+=($!)
 
         gpu_job_count[$gpu_idx]=$(( ${gpu_job_count[$gpu_idx]} + 1 ))

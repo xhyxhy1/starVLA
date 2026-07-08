@@ -4,6 +4,7 @@ import logging
 import math
 import os
 import pathlib
+import sys
 import time
 from collections import deque
 from pathlib import Path
@@ -17,6 +18,9 @@ import numpy as np
 import tqdm
 from libero.libero import benchmark, get_libero_path
 from libero.libero.envs import OffScreenRenderEnv
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from libero_plus_metrics import LiberoPlusMetricRecorder, load_task_mapping
 
 from starVLA.model.framework.base_framework import baseframework
 from starVLA.model.tools import read_mode_config
@@ -106,7 +110,7 @@ class Args:
         "libero_goal"  # Task suite. Options: libero_spatial, libero_object, libero_goal, libero_10, libero_90
     )
     num_steps_wait: int = 10  # Number of steps to wait for objects to stabilize i n sim
-    num_trials_per_task: int = 50  # Number of rollouts per task
+    num_trials_per_task: int = 1  # LIBERO-plus evaluates one rollout per task
 
     #################################################################################################################
     # Utils
@@ -395,18 +399,11 @@ def eval_libero(args: Args) -> None:
         use_bf16=args.use_bf16,
     )
 
-    disturb_res = {}
     LIBERO_HOME = os.environ.get("LIBERO_HOME", "path_to_LIBERO-plus")
-    with open(os.path.join(LIBERO_HOME, "libero/libero/benchmark/task_classification.json")) as f:
-        TASK_MAPPING = json.load(f)[args.task_suite_name]
-
-    ID2CATEGORY = {}
-    for item in TASK_MAPPING:
-        category = item["category"]
-        item_name = item["name"]
-        ID2CATEGORY[item["id"]] = (category, item_name)
-        if category not in disturb_res:
-            disturb_res[category] = {"total_count": 0, "success_count": 0}
+    task_mapping = load_task_mapping(args.task_suite_name, LIBERO_HOME)
+    metrics = LiberoPlusMetricRecorder(
+        args.task_suite_name, task_mapping, task_range=(args.start_idx, args.end_idx)
+    )
 
     # Start evaluation
 
@@ -524,21 +521,20 @@ def eval_libero(args: Args) -> None:
                 if done:
                     task_successes += 1
                     total_successes += 1
-                    disturb_res[ID2CATEGORY[task_id + 1][0]]["success_count"] += 1
                     break
                 t += 1
                 step += 1
 
             task_episodes += 1
             total_episodes += 1
-            disturb_res[ID2CATEGORY[task_id + 1][0]]["total_count"] += 1
+            metrics.record_episode(task_id, bool(done))
 
             # Save a replay video of the episode
             suffix = "success" if done else "failure"
             task_segment = task_description.replace(" ", "_")
 
             imageio.mimwrite(
-                pathlib.Path(video_out_path) / f"rollout_{ID2CATEGORY[task_id+1][1]}_episode{episode_idx}_{suffix}.mp4",
+                pathlib.Path(video_out_path) / f"rollout_{metrics.task_name(task_id)}_episode{episode_idx}_{suffix}.mp4",
                 [np.asarray(x) for x in replay_images],
                 fps=25,
             )
@@ -556,7 +552,7 @@ def eval_libero(args: Args) -> None:
         logger.info(f"Current task success rate: {float(task_successes) / float(task_episodes)}")
         logger.info(f"Current total success rate: {float(total_successes) / float(total_episodes)}")
     with open(os.path.join(log_path, f"{args.start_idx}_to_{args.end_idx}.json"), "w", encoding="utf-8") as f:
-        json.dump(disturb_res, f)
+        json.dump(metrics.to_dict(), f, indent=2)
     logger.info(f"Total success rate: {float(total_successes) / float(total_episodes)}")
     logger.info(f"Total episodes: {total_episodes}")
 

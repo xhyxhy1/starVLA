@@ -35,6 +35,9 @@ from transformers import AutoProcessor, get_scheduler
 from starVLA.dataloader import build_dataloader
 from starVLA.model.framework.base_framework import build_framework
 from starVLA.model.framework.share_tools import apply_config_compat
+from starVLA.model.modules.action_model.lap_textualize import (
+    language_actions_to_interpolated_actions,
+)
 from starVLA.training.trainer_utils.config_tracker import AccessTrackedConfig, wrap_config
 from starVLA.training.trainer_utils.trainer_tools import TrainerUtils, build_param_lr_groups, setup_optimizer_and_scheduler, normalize_dotlist_args
 
@@ -346,11 +349,23 @@ class VLATrainer(TrainerUtils):
         )
 
         if self.accelerator.is_main_process:
-            normalized_actions = output_dict["normalized_actions"]
             actions = np.array(actions)
-            num_pots = np.prod(actions.shape)
-            score = TrainerUtils.euclidean_distance(normalized_actions, actions)
-            step_metrics["mse_score"] = score / num_pots
+            if "normalized_actions" in output_dict:
+                normalized_actions = output_dict["normalized_actions"]
+                num_pots = np.prod(actions.shape)
+                score = TrainerUtils.euclidean_distance(normalized_actions, actions)
+                step_metrics["mse_score"] = score / num_pots
+            elif "language_actions" in output_dict:
+                horizon = int(self.config.framework.action_model.get("action_horizon", actions.shape[1]))
+                target_actions = actions[:, -horizon:, :]
+                interpolated_actions = language_actions_to_interpolated_actions(
+                    output_dict["language_actions"],
+                    horizon=horizon,
+                    action_dim=target_actions.shape[-1],
+                )
+                num_pots = np.prod(target_actions.shape)
+                score = TrainerUtils.euclidean_distance(interpolated_actions, target_actions)
+                step_metrics["lap_interp_mse_score"] = score / num_pots
 
         del examples
         dist.barrier()

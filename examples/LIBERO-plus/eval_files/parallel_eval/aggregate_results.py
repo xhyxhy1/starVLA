@@ -2,34 +2,32 @@ import argparse
 import glob
 import json
 import os
+import sys
+from pathlib import Path
 
-parser = argparse.ArgumentParser(description="aggregate results")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from libero_plus_metrics import merge_metric_results
 
-parser.add_argument("--root_path", help="")
-args = parser.parse_args()
-log_dir = args.root_path
 
-task_suites = ["libero_10", "libero_goal", "libero_object", "libero_spatial"]
-overall_results = {"overall": {"total_count": 0, "success_count": 0}}
-for task_suite in task_suites:
-    cur_root = os.path.join(log_dir, "logs", task_suite)
-    json_files = glob.glob(os.path.join(cur_root, "*.json"), recursive=True)
-    for file in json_files:
-        with open(file) as f:
-            results = json.load(f)
-        for item in results:
-            overall_results["overall"]["total_count"] += results[item]["total_count"]
-            overall_results["overall"]["success_count"] += results[item]["success_count"]
-            if item not in overall_results:
-                overall_results[item] = results[item]
-            else:
-                overall_results[item]["total_count"] += results[item]["total_count"]
-                overall_results[item]["success_count"] += results[item]["success_count"]
+def main() -> None:
+    parser = argparse.ArgumentParser(description="aggregate LIBERO-plus results")
+    parser.add_argument("--root_path", required=True)
+    args = parser.parse_args()
 
-for category in overall_results:
-    overall_results[category]["success_rate"] = float(overall_results[category]["success_count"]) / float(
-        overall_results[category]["total_count"]
-    )
+    log_dir = Path(args.root_path)
+    task_suites = ["libero_10", "libero_goal", "libero_object", "libero_spatial"]
+    results = []
+    for task_suite in task_suites:
+        cur_root = log_dir / "logs" / task_suite
+        json_files = sorted(glob.glob(os.path.join(cur_root, "*.json")))
+        for file in json_files:
+            with open(file, encoding="utf-8") as f:
+                results.append(json.load(f))
 
-with open(os.path.join(log_dir, "overall_results.json"), "w", encoding="utf-8") as f:
-    json.dump(overall_results, f)
+    overall_results = merge_metric_results(results)
+    with open(log_dir / "overall_results.json", "w", encoding="utf-8") as f:
+        json.dump(overall_results, f, indent=2)
+
+
+if __name__ == "__main__":
+    main()

@@ -112,10 +112,16 @@ class _QWen3_VL_Interface(nn.Module):
             )
         return generation_output
 
-    def build_qwenvl_inputs(self, images, instructions, solutions=None, **kwargs):
+    def build_qwenvl_inputs(self, images, instructions, solutions=None, mask_mode="action_token", **kwargs):
         """
         Build model inputs from raw data (images + instructions + optional solutions).
         Follow Oficial Qwen3-VL Instruct format: https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct
+
+        mask_mode controls label supervision when ``solutions`` is given:
+          - "action_token": legacy FAST path; supervise from the first action
+            special token in [_ACTION_TOKEN_MIN, _ACTION_TOKEN_MAX].
+          - "role": supervise the whole assistant reply (for natural-language
+            action text / LAP, which has no special action tokens).
         """
 
         # Create messages: one message per sample
@@ -138,35 +144,65 @@ class _QWen3_VL_Interface(nn.Module):
                 msg.append({"role": "assistant", "content": [{"type": "text", "text": solution}]})
             messages.append(msg)
 
-        # Preparation for inference
-
+        # Role-based supervision (LAP) must NOT append an extra generation prompt
+        # after the assistant turn. Inference (no solutions) and the legacy FAST
+        # token path keep add_generation_prompt=True.
+        add_generation_prompt = not (solutions is not None and mask_mode == "role")
         batch_inputs = self.processor.apply_chat_template(
-            messages, tokenize=True, padding=True, add_generation_prompt=True, return_dict=True, return_tensors="pt"
+            messages,
+            tokenize=True,
+            padding=True,
+            add_generation_prompt=add_generation_prompt,
+            return_dict=True,
+            return_tensors="pt",
         )
 
-        # if solutions, mask out the solution tokens in labels
-        if solutions is not None:  #  here only for fast_tokenizer now.
-            action_token_min = _ACTION_TOKEN_MIN  # how can we know this range? --> we has other way for this, but is slower see qwenhelix branch
-            action_token_max = _ACTION_TOKEN_MAX  # here only for fast_tokenizer, see starVLA/model/modules/vlm/tools/add_qwen_special_tokens/README.md
-            labels = batch_inputs["input_ids"].clone()
-            # For each sequence in the batch, find the first occurrence of an action token.
-            for i in range(labels.size(0)):
-                seq = labels[i]
-                # Create a mask for tokens within the action token range.
-                mask_seq = (seq >= action_token_min) & (seq <= action_token_max)
-                nonzero_indices = torch.nonzero(mask_seq, as_tuple=False)
-                if nonzero_indices.numel() > 0:
-                    first_action_index = nonzero_indices[0].item()
-                    # Mask out all tokens before the first action token.
-                    seq[:first_action_index] = IGNORE_INDEX
-                else:
-                    # If no action token is found, mask the entire sequence.
-                    seq[:] = IGNORE_INDEX
-                    RuntimeWarning(
-                        "action token are on in yout tokenizer, plz see starVLA/model/modules/vlm/tools/add_qwen_special_tokens/README.md."
+        # if solutions, mask out everything except the supervised target in labels
+        if solutions is not None:
+            pad_id = self.processor.tokenizer.pad_token_id
+            if mask_mode == "role":
+                # Supervise the assistant reply only. For each sample, tokenize the
+                # prompt-only turn (user + generation prompt) to locate where the
+                # assistant content begins, then mask everything before it. With
+                # left padding the reply occupies the trailing tokens.
+                input_ids = batch_inputs["input_ids"]
+                attn = batch_inputs["attention_mask"]
+                labels = input_ids.clone()
+                seq_len = input_ids.shape[1]
+                for i, msg in enumerate(messages):
+                    prompt_only = self.processor.apply_chat_template(
+                        [msg[:-1]],
+                        tokenize=True,
+                        add_generation_prompt=True,
+                        return_dict=True,
+                        return_tensors="pt",
                     )
+                    prompt_len = prompt_only["input_ids"].shape[1]
+                    real_len = int(attn[i].sum())
+                    response_len = real_len - prompt_len
+                    if response_len <= 0:
+                        labels[i, :] = IGNORE_INDEX
+                    else:
+                        labels[i, : seq_len - response_len] = IGNORE_INDEX
+            else:
+                # Legacy FAST path: supervise tokens from the first action token.
+                action_token_min = _ACTION_TOKEN_MIN
+                action_token_max = _ACTION_TOKEN_MAX
+                labels = batch_inputs["input_ids"].clone()
+                for i in range(labels.size(0)):
+                    seq = labels[i]
+                    mask_seq = (seq >= action_token_min) & (seq <= action_token_max)
+                    nonzero_indices = torch.nonzero(mask_seq, as_tuple=False)
+                    if nonzero_indices.numel() > 0:
+                        first_action_index = nonzero_indices[0].item()
+                        seq[:first_action_index] = IGNORE_INDEX
+                    else:
+                        seq[:] = IGNORE_INDEX
+                        RuntimeWarning(
+                            "action token are on in yout tokenizer, plz see starVLA/model/modules/vlm/tools/add_qwen_special_tokens/README.md."
+                        )
 
-            labels[labels == self.processor.tokenizer.pad_token_id] = -100  ## mask out pad tokens as well
+            labels[batch_inputs["input_ids"] == pad_id] = IGNORE_INDEX  # mask out pad tokens as well
             batch_inputs["labels"] = labels
 
         return batch_inputs.to(self.model.device)

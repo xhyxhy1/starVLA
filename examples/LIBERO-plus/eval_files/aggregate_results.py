@@ -1,26 +1,30 @@
 import json
 import os
+from pathlib import Path
 
-log_dir = os.environ.get("LOG_DIR")
+from libero_plus_metrics import merge_metric_results
 
-task_suites = ["libero_10.json", "libero_goal.json", "libero_object.json", "libero_spatial.json"]
-overall_results = {"overall": {"total_count": 0, "success_count": 0}}
-for task_suite in task_suites:
-    with open(os.path.join(log_dir, task_suite)) as f:
-        results = json.load(f)
-    for item in results:
-        overall_results["overall"]["total_count"] += results[item]["total_count"]
-        overall_results["overall"]["success_count"] += results[item]["success_count"]
-        if item not in overall_results:
-            overall_results[item] = results[item]
-        else:
-            overall_results[item]["total_count"] += results[item]["total_count"]
-            overall_results[item]["success_count"] += results[item]["success_count"]
 
-for category in overall_results:
-    overall_results[category]["success_rate"] = float(overall_results[category]["success_count"]) / float(
-        overall_results[category]["total_count"]
-    )
+def main() -> None:
+    log_dir = os.environ.get("LOG_DIR")
+    if not log_dir:
+        raise RuntimeError("LOG_DIR is required")
 
-with open(os.path.join(log_dir, "overall_results.json"), "w", encoding="utf-8") as f:
-    json.dump(overall_results, f)
+    root = Path(log_dir)
+    task_suites = ["libero_10", "libero_goal", "libero_object", "libero_spatial"]
+    results = []
+    for task_suite in task_suites:
+        for path in sorted(root.glob(f"{task_suite}_*_to_*.json")):
+            with open(path, encoding="utf-8") as f:
+                results.append(json.load(f))
+
+    if not results:
+        raise RuntimeError(f"No LIBERO-plus result json files found in {root}")
+
+    overall_results = merge_metric_results(results)
+    with open(root / "overall_results.json", "w", encoding="utf-8") as f:
+        json.dump(overall_results, f, indent=2)
+
+
+if __name__ == "__main__":
+    main()

@@ -4,17 +4,39 @@ import logging
 import math
 import os
 import pathlib
+import sys
 import time
 
 import imageio
 import numpy as np
+import torch
 import tqdm
 import tyro
+
+# PyTorch >= 2.6: torch.load defaults to weights_only=True; LIBERO-plus init_states
+# are trusted numpy pickles, not model checkpoints.
+_orig_torch_load = torch.load
+
+
+def _torch_load_compat(*args, **kwargs):
+    kwargs.setdefault("weights_only", False)
+    return _orig_torch_load(*args, **kwargs)
+
+
+torch.load = _torch_load_compat  # type: ignore[method-assign]
+
 from libero.libero import benchmark, get_libero_path
 from libero.libero.envs import OffScreenRenderEnv
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
-from examples.LIBERO.eval_files.model2libero_interface import ModelClient
+from libero_plus_metrics import (
+    LiberoPlusMetricRecorder,
+    count_task_ids_by_category,
+    load_task_mapping,
+    safe_filename_part,
+    select_task_ids_by_category_fraction,
+)
+from model2libero_interface import ModelClient
 
 LIBERO_DUMMY_ACTION = [0.0] * 6 + [-1.0]
 LIBERO_ENV_RESOLUTION = 256  # resolution used to render training data
@@ -40,7 +62,7 @@ class Args:
         "libero_goal"  # Task suite. Options: libero_spatial, libero_object, libero_goal, libero_10, libero_90
     )
     num_steps_wait: int = 10  # Number of steps to wait for objects to stabilize i n sim
-    num_trials_per_task: int = 50  # Number of rollouts per task
+    num_trials_per_task: int = 1  # LIBERO-plus evaluates one rollout per task
 
     #################################################################################################################
     # Utils
@@ -55,6 +77,11 @@ class Args:
     post_process_action: bool = True
 
     job_name: str = "test"
+
+    start_idx: int = 0
+    end_idx: int = -1
+    category_fraction: float = 1.0
+    log_every_tasks: int = 100
 
 
 def eval_libero(args: Args) -> None:
@@ -86,30 +113,40 @@ def eval_libero(args: Args) -> None:
     else:
         raise ValueError(f"Unknown task suite: {args.task_suite_name}")
 
+    # Un-normalization is handled by policy server; client only needs websocket + unnorm_key.
     client_model = ModelClient(
-        policy_ckpt_path=args.pretrained_path,  # to get unnormalization stats
         host=args.host,
         port=args.port,
         image_size=args.resize_size,
     )
 
-    disturb_res = {}
-    LIBERO_HOME = os.environ.get("LIBERO_HOME", "path_to_LIBERO-plus_home")
-    with open(os.path.join(LIBERO_HOME, "libero/libero/benchmark/task_classification.json")) as f:
-        TASK_MAPPING = json.load(f)[args.task_suite_name]
-    ID2CATEGORY = {}
-    for item in TASK_MAPPING:
-        category = item["category"]
-        item_name = item["name"]
-        ID2CATEGORY[item["id"]] = (category, item_name)
-        if category not in disturb_res:
-            disturb_res[category] = {"total_count": 0, "success_count": 0}
-        disturb_res[category]["total_count"] += 1
+    if args.end_idx == -1:
+        args.end_idx = num_tasks_in_suite
+    if args.start_idx < 0 or args.end_idx > num_tasks_in_suite or args.start_idx >= args.end_idx:
+        raise ValueError(
+            f"Invalid task range [{args.start_idx}, {args.end_idx}) for "
+            f"{args.task_suite_name} with {num_tasks_in_suite} tasks"
+        )
+
+    task_mapping = load_task_mapping(args.task_suite_name)
+    task_ids = select_task_ids_by_category_fraction(
+        task_mapping, args.start_idx, args.end_idx, args.category_fraction
+    )
+    metrics = LiberoPlusMetricRecorder(
+        args.task_suite_name, task_mapping, task_range=(args.start_idx, args.end_idx)
+    )
 
     # Start evaluation
 
     total_episodes, total_successes = 0, 0
-    for task_id in tqdm.tqdm(range(num_tasks_in_suite)):
+    selected_by_category = count_task_ids_by_category(task_mapping, task_ids)
+    logging.info(
+        f"Selected {len(task_ids)} / {args.end_idx - args.start_idx} tasks "
+        f"with category_fraction={args.category_fraction}"
+    )
+    logging.info(f"Selected by category: {json.dumps(selected_by_category, sort_keys=True)}")
+    progress_disabled = not sys.stderr.isatty()
+    for task_id in tqdm.tqdm(task_ids, disable=progress_disabled):
 
         # Get task
         task = task_suite.get_task(task_id)
@@ -122,9 +159,9 @@ def eval_libero(args: Args) -> None:
 
         # Start episodes
         task_episodes, task_successes = 0, 0
-        for episode_idx in tqdm.tqdm(range(args.num_trials_per_task)):
+        for episode_idx in tqdm.tqdm(range(args.num_trials_per_task), disable=progress_disabled):
 
-            logging.info(f"\nTask: {task_description}")
+            logging.debug(f"Task: {task_description}")
 
             # Reset environment
             client_model.reset(task_description=task_description)  # Reset the client connection
@@ -138,7 +175,7 @@ def eval_libero(args: Args) -> None:
             replay_images = []
             full_actions = []
 
-            logging.info(f"Starting episode {task_episodes + 1}...")
+            logging.debug(f"Starting episode {task_episodes + 1}...")
             step = 0
 
             # full_actions = np.load("./debug/action.npy")
@@ -218,21 +255,29 @@ def eval_libero(args: Args) -> None:
                 if done:
                     task_successes += 1
                     total_successes += 1
-                    disturb_res[ID2CATEGORY[task_id + 1][0]]["success_count"] += 1
                     break
                 t += 1
                 step += 1
 
             task_episodes += 1
             total_episodes += 1
+            metrics.record_episode(task_id, bool(done))
 
-            # Save a replay video of the episode
+            # Save a replay video of the episode. Include LIBERO-plus metadata in
+            # the filename so videos can be inspected without opening JSON files.
             suffix = "success" if done else "failure"
-            task_segment = task_description.replace(" ", "_")
+            task_meta = metrics.task_meta(task_id)
+            category = safe_filename_part(task_meta["category"])
+            difficulty = safe_filename_part(f"L{task_meta['difficulty_level']}")
+            task_name = safe_filename_part(task_meta["name"])
+            video_name = (
+                f"rollout_{args.task_suite_name}_"
+                f"id{task_id + 1:06d}_{category}_{difficulty}_"
+                f"{task_name}_episode{episode_idx}_{suffix}.mp4"
+            )
 
             imageio.mimwrite(
-                pathlib.Path(args.video_out_path)
-                / f"rollout_{ID2CATEGORY[task_id+1][1]}_episode{episode_idx}_{suffix}.mp4",
+                pathlib.Path(args.video_out_path) / video_name,
                 [np.asarray(x) for x in replay_images],
                 fps=25,
             )
@@ -241,16 +286,21 @@ def eval_libero(args: Args) -> None:
             # np.save(pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_episode{episode_idx}_{suffix}.npy", full_actions)
 
             # print(pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_episode{episode_idx}_{suffix}.mp4")
-            # Log current results
-            logging.info(f"Success: {done}")
-            logging.info(f"# episodes completed so far: {total_episodes}")
-            logging.info(f"# successes: {total_successes} ({total_successes / total_episodes * 100:.1f}%)")
+            # Log compact progress; per-task details stay at DEBUG.
+            logging.debug(f"Success: {done}")
+            if total_episodes == 1 or total_episodes % args.log_every_tasks == 0:
+                logging.info(
+                    f"Progress: episodes={total_episodes}/{len(task_ids)}, "
+                    f"successes={total_successes}, "
+                    f"success_rate={total_successes / total_episodes * 100:.1f}%"
+                )
 
-        # Log final results
-        logging.info(f"Current task success rate: {float(task_successes) / float(task_episodes)}")
-        logging.info(f"Current total success rate: {float(total_successes) / float(total_episodes)}")
-    with open(os.path.join(args.log_path, f"{args.task_suite_name}.json"), "w", encoding="utf-8") as f:
-        json.dump(disturb_res, f)
+        # Log per-task results only in DEBUG to keep large runs compact.
+        logging.debug(f"Current task success rate: {float(task_successes) / float(task_episodes)}")
+        logging.debug(f"Current total success rate: {float(total_successes) / float(total_episodes)}")
+    output_name = f"{args.task_suite_name}_{args.start_idx}_to_{args.end_idx}.json"
+    with open(os.path.join(args.log_path, output_name), "w", encoding="utf-8") as f:
+        json.dump(metrics.to_dict(), f, indent=2)
     logging.info(f"Total success rate: {float(total_successes) / float(total_episodes)}")
     logging.info(f"Total episodes: {total_episodes}")
 

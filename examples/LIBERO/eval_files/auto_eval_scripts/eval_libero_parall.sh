@@ -24,7 +24,7 @@ gpu_id=$3   # GPU id to use (e.g. 0, 1, 2, ...)
 base_port=$4 # unique port for this eval instance
 ##### === variables for which evaluation to setup ===
 
-num_trials_per_task=50
+num_trials_per_task=20
 host="127.0.0.1"
 
 CUDA_VISIBLE_DEVICES=$gpu_id ${starVLA_python} deployment/model_server/server_policy.py \
@@ -43,6 +43,7 @@ folder_name=$(echo "$your_ckpt" | awk -F'/' '{print $(NF-2)"_"$(NF-1)"_"$NF}')
 
 video_out_path="${model_root}/videos/${task_suite_name}/${folder_name}"
 log_path="${model_root}/logs/${task_suite_name}"
+rm -rf "$video_out_path"
 mkdir -p "$video_out_path"
 mkdir -p "$log_path"
 

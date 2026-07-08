@@ -11,6 +11,7 @@ export NCCL_TIMEOUT=1000  # timeout set to 1 hour (unit: seconds)
 Framework_name=QwenOFT
 freeze_module_list=''
 base_vlm=playground/Pretrained_models/Qwen3-VL-4B-Instruct
+data_root_dir=/home/xhy/data/StarVLA/RoboTwin-Randomized
 config_yaml=./examples/Robotwin/train_files/starvla_cotrain_robotwin_abs.yaml
 run_root_dir=./results/Checkpoints
 data_mix=robotwin_all_50
@@ -44,7 +45,8 @@ accelerate launch \
   --run_root_dir ${run_root_dir} \
   --run_id ${run_id} \
   --wandb_project starVLA_Robotwin \
-  --wandb_entity axi-the-cat \
+  --wandb_entity haoyuxiong \
+  2>&1 | tee "${output_dir}/train.log"
   # --is_debug True
 
 

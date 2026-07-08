@@ -48,7 +48,7 @@ class AdaptiveEnsembler:
 class ModelClient:
     def __init__(
         self,
-        policy_ckpt_path,
+        policy_ckpt_path=None,
         unnorm_key: Optional[str] = None,
         policy_setup: str = "franka",
         horizon: int = 0,

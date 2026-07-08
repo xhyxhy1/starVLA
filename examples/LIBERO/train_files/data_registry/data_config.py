@@ -15,16 +15,9 @@ class Libero4in1DataConfig:
         "video.primary_image",
         "video.wrist_image",
     ]
-    state_keys = [
-        "state.x",
-        "state.y",
-        "state.z",
-        "state.roll",
-        "state.pitch",
-        "state.yaw",
-        "state.pad",
-        "state.gripper",
-    ]
+    # 训练只保存了 action 归一化统计（dataset_statistics.json 无 state），
+    # policy server 反归一化只需 action；勿在此声明 state_keys。
+    state_keys: list = []
     action_keys = [
         "action.x",
         "action.y",
