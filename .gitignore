@@ -149,7 +149,7 @@ dmypy.json
 .claude/
 .omc/
 .superpowers/
-
+CLAUDE.md
 # Mac OS
 .DS_Store
 
@@ -258,6 +258,8 @@ logs/*
 bar
 **/.nf*
 code
-examples/RoboChallenge_table30v2/*
 examples/LIBERO/eval_files/auto_eval_scripts/run_all_libero_untested.sh
 starVLA/model/framework/VLM4A/QwenGR00T_v2.py
+
+tosutil
+libero_results.xlsx
